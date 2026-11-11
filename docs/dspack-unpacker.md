@@ -16,13 +16,21 @@ python3 dspack_unpack.py resources/Patch.dsPack --list
 python3 dspack_unpack.py resources/Patch.dsPack --extract /tmp/Patch-unpacked
 ```
 
+Включить декодирование MiniPack для framed entries в новый каталог:
+
+```bash
+python3 dspack_unpack.py resources/Patch.dsPack --extract /tmp/Patch-decoded --decompress-minipack
+```
+
+Без флага `--decompress-minipack` режим остается консервативным: неизвестные compressed payload сохраняются как `.cmp`. С флагом decoder применяется только к size-different entries с валидным marker/frame. Blocks, для которых stored size равен expected output size, копируются как raw и явно отмечаются в manifest. Entries с незнакомым framing остаются `.cmp`.
+
 Каталог назначения должен быть пустым или отсутствовать. Непустой каталог отвергается; уже существующие файлы никогда не перезаписываются. Имена проверяются на абсолютные пути и traversal (`..`), циклические ссылки родительских папок, выход за границы и symlink-компоненты каталога назначения. Повторяющиеся пути получают уникальный суффикс с индексом записи.
 
 ## Поведение с компрессией
 
-Текущий распаковщик извлекает **хранимые байты**, но не пытается угадать алгоритм декомпрессии. Если `stored_size != unpacked_size`, имя результата получает дополнительное расширение `.cmp`, а в manifest фиксируются ожидаемый распакованный размер и `codec: unknown`. Равные размеры считаются «размеры совпадают»; это не является самостоятельным доказательством отсутствия шифрования или иной трансформации.
+Обычный режим извлекает **хранимые байты**, не пытаясь угадать алгоритм декомпрессии. В явно выбранном режиме `--decompress-minipack` известные MiniPack frames проходят decoder с ожидаемым output size и block bounds. Неизвестные/не framed compressed entries по-прежнему сохраняются с `.cmp`. Равные размеры сами по себе не означают отсутствия трансформации; raw passthrough разрешен только для block record внутри подтвержденного frame и отражается в manifest.
 
-На `Patch.dsPack` проверены стандартные гипотезы `zlib`, raw DEFLATE, gzip, bzip2 и xz/LZMA. Ни одна из сжатых записей не прошла все строгие условия одновременно: декодер завершил поток, не осталось хвостовых данных, выход точно равен размеру из индекса. Также проверена опубликованная экспериментальная MiniPack-гипотеза: она немедленно получает недопустимые back-reference на первой же записи. Поэтому такой decoder не включен в extractor. Независимый разбор framing нашел таблицы блоков у части записей, описанные ниже; сами блоки пока непрозрачны. Факты о неподтвержденных QuickBMS и сторонних парсерах описаны в `dspack-forensics.md` и не используются как доверенная реализация.
+Ранние проверки стандартных гипотез `zlib`, raw DEFLATE, gzip, bzip2 и xz/LZMA не нашли точных декодирований. Сторонняя MiniPack-гипотеза тоже оказалась неполной. Позднее статическое исследование EXE позволило восстановить tree model и token grammar; результаты opt-in реализации и проверки приведены ниже. Публичные QuickBMS/экстракторы не считаются эталонной реализацией.
 
 ### Наблюдаемое framing блоков
 
@@ -65,7 +73,7 @@ PE содержит CodeView RSDS ссылку на `c:\FEAR3_code\Code\output\b
 
 ## Воспроизводимая модельная диагностика
 
-`minipack_model.py` содержит безопасные diagnostic primitives, не включенные в extraction path: `WordBits` читает big-endian 32-bit words с проверенным порядком битов; `inspect_model_header` валидирует три post-model поля; `build_model` строит fast/node tables в ограниченных Python arrays с границами и recursion guard; `validate_fast_lookup` сравнивает fast entries с медленным root-tree traversal для всех 10-bit prefixes. Это не token decoder и не выдает восстановленный asset.
+`minipack_model.py` содержит bounded model builder, fast-lookup consistency check и token decoder. Decoder пока включается только явно через `--decompress-minipack`.
 
 На всех семи blocks трех записей `Persistent.dsPreload` и четырех записей `UI/F2MenuTree.dsMenuFlow` получены 1024/1024 заполненных fast entries и ноль mismatches между fast-table lookup и медленным обходом построенного node tree; все node references указывают на созданные records. Число recursive calls/control bytes равно `N`, символов потреблено `N+1`. Заголовки `token_count/output_size/literal_offset` проходят проверки на тех же blocks. Суммарно проверено 7 моделей, 7 168 fast slots, 1 746 builder calls и 11 894 заявленных token iterations. Это верифицирует tree construction и fast/node consistency на игровых данных; успешный token/output decode все еще не получен.
 
@@ -73,7 +81,7 @@ PE содержит CodeView RSDS ссылку на `c:\FEAR3_code\Code\output\b
 
 Уточнение ABI специализированного вызова из `0x64A3E1` в `0x64AE90`: это stack-argument функция с пятью аргументами и обычным `ret` (caller очищает 20 байт). В порядке push передаются выбранная table entry `+4`, object `+0x34`, адрес stack local, object `+0x30` и адрес другого stack local; `ECX` тоже указывает на последний local, но его нельзя автоматически трактовать как C++ `this`. Внутри `0x64AE90` значения используются для model prefix, границы bitstream и инициализации reader, однако source-level роли двух object buffer fields не подтверждены. До token decoder вызываются `0x6569A0` и извлекаются три 32-битных поля из reader. На двух игровых образцах эти big-endian слова точно совпали с ожидаемыми значениями: token count, output size, literal-data offset. В `0x64AE90` token count маскируется глобалом `0x17C3AE8`, который статически равен `0xFFFFFFFF`; значит mask оставляет count неизменным. `0x64AAD0` уменьшает его раз за outer iteration. Это **не dsPack block count**, который используется только для выбора table row. Все три header-поля найдены на реальных blocks и проверены: смещение literal-data указывает на читаемые raw bytes, output size равен frame block output.
 
-Уточнение по результату независимого статического разбора: имеющиеся инструкции показывают **битовый декодер по заранее сериализованному дереву**, а не подтвержденный арифметический range-coder с адаптивными вероятностями. `0x64ae90` очищает модель, вызывает разбор сериализованного дерева, инициализирует bit reader и вызывает `0x64aad0`. Helpers `0x6569f0` / `0x6569a0` буферизуют входные биты из endian-конвертированных 32-битных слов; `0x656be0` использует младшие 10 бит для выбора узла, затем потребляет биты для обхода дерева до листа `< 0x100`. `0x656c80` очищает области модели размером `0x2000` и `0x1000`. В `0x64aad0` обнаружены четыре класса токенов по верхним двум битам:
+Уточнение по независимому статическому разбору: это **битовый decoder по сериализованному дереву**, не adaptive arithmetic/range coder. `0x64ae90` очищает модель, строит дерево, инициализирует reader и читает три 32-bit поля; `0x64aad0` декодирует токены. Helpers `0x6569f0` / `0x6569a0` читают endian-swapped 32-bit words, `0x656be0` ходит по дереву. В `0x64aad0` обнаружены четыре класса токенов:
 
 | `token & 0xC0` | Операция | Поля |
 |---:|---|---|
@@ -82,7 +90,7 @@ PE содержит CodeView RSDS ссылку на `c:\FEAR3_code\Code\output\b
 | `0x80` | Ближний match | distance `token & 0x3F`; length `next_symbol + 6` |
 | `0x40` | Match фиксированной длины | length `(token & 0x3F) + 6`; distance `next_symbol` |
 
-Копирование match должно быть forward bytewise (как LZ), потому что источник `out - distance` может перекрываться с уже записанным выходом. После заданного числа токенов decoder читает конечный символ количества и выполняет дополнительное копирование. Эта последняя операция и точная привязка source/output cursor пока не доказаны до конца из caller setup. Результат исключает прежнее, недостаточно обоснованное описание «адаптивного range-кодека»; сериализация дерева и cursor semantics пока требуют восстановления.
+Копирование match выполняется forward bytewise с поддержкой overlap. После `token_count` decoder читает дополнительный terminal literal count. При реализации этого хвоста есть отдельный caller-supplied source pointer (arg5 `0x64AAD0`), а обычные literal runs используют cursor, переданный по адресу arg1; эти указатели нельзя отождествлять только по high-level pseudocode. Текущий diagnostic decoder читает оба вида literal bytes из raw literal-data region по header offset, потому что так восстанавливаются ожидаемые outputs для tested blocks; отдельный статический аудит caller arg5 еще нужен, прежде чем утверждать идентичность source pointers для всех contexts. Bounds/длины ограничены ожидаемым block output.
 
 ### Проверка границы модель/битовый поток
 
@@ -119,7 +127,7 @@ Cursor расчет повторен на двух игровых blocks:
 | `Preloads.dsPack`, entry 2, `Persistent.dsPreload` | `0xB6C563` / `0x24E0` | `0xFE` | `0x1FE` | `00 00 07 A1 00 00 80 00` |
 | `Patch.dsPack`, entry 35, `UI/F2MenuTree.dsMenuFlow` | `0x2AA2A` / `0x1AF4` | `0xF6` | `0x1EE` | `00 00 06 72 00 00 80 00` |
 
-В обоих случаях cursor равен `block_start+2*n+2`; с frame table это дает непрерывный stored block range. Reader endian-swaps 32-bit words при preloading. Повторяемый вид заголовка после model cursor полезен как framing evidence, но не доказывает правильную интерпретацию всех tree entries и не подтверждает валидный выход.
+В обоих случаях cursor равен `block_start+2*n+2`; с frame table это дает границу модели/bitstream. Reader endian-swaps 32-bit words; первые три successive 32-bit reads после границы являются token count, output size, literal offset. После них token code bits начинаются на boundary+12, а literal data начинается по независимому `block_base+literal_offset`.
 
 Ограниченный Python-перенос аргументной рекурсии дерева на раннем этапе дал `-1` / `0xffffffff` из-за неверного stack mapping. После исправления второго child `a6=span-1`, zero-control fall-through и глубины stride точный probe на семи блоках дал следующую таблицу:
 
@@ -128,9 +136,9 @@ Cursor расчет повторен на двух игровых blocks:
 | `Persistent.dsPreload`, 4 blocks | 251–255 | calls | `N+1` | 1024/1024 each | 1011–1018 | 6–13 | 256–510 |
 | `F2MenuTree.dsMenuFlow`, 3 blocks | 237–248 | calls | `N+1` | 1024/1024 each | 1004–1014 | 10–20 | 256–503 |
 
-Для каждого из этих 7 blocks все 1024 fast-table entries совпали с независимым медленным обходом node tree для соответствующего 10-bit prefix; node references имели допустимые индексы. Это подтверждает построение модели и согласование fast lookup с node tree по статическим правилам decoder-а. Это **не** проверяет token decoder или восстановленный output.
+Для каждого из этих 7 blocks все 1024 fast-table entries совпали с независимым медленным обходом node tree для соответствующего 10-bit prefix; node references имели допустимые индексы. Это подтверждает построение модели и согласование fast lookup с node tree по статическим правилам decoder-а. В дальнейшем token decoder также прошел на всех блоках этих двух entries.
 
-Recursive builder `EAX` и wrapper cursor — два разных значения. Wrapper вызывает `0x656A30`, очищает stack args, **игнорирует его `EAX`** и сам вычисляет `input + 2*N + 2`; именно этот cursor передается далее в `0x6569F0`. Затем caller отдельно вычисляет оставшийся диапазон из верхней границы/base и этого cursor, поэтому cursor нельзя считать model length без этой пары. Bounded probe recursive tree сообщает свои return значения `294` и `384` для двух образцов; это значения builder-а и не заменяют wrapper cursor `510` и `494`. Control bytes адресуются через `input[a2]` с `a2=N+1`, leaf symbols идут отдельным `a3`, начинающимся с нуля. Bounds-safe проход на двух примерах пока **не валидирует каждую запись lookup семантически**, не запускает token decoder и не подтверждает выходные байты.
+Recursive builder `EAX` и wrapper cursor — два разных значения. Wrapper вызывает `0x656A30`, **игнорирует его EAX** и сам вычисляет `input+2*N+2`; именно этот cursor передается далее в `0x6569F0`. Builder return равен `N+1` symbol bytes; это не bitstream boundary. Control bytes адресуются отдельно через `a2=N+1`, leaf symbols идут через `a3`, начинающийся с нуля.
 
 В одном из временных extraction-путей ранее указывался prefix `00 00 A0 74` для `UI/F2MenuTree.dsMenuFlow.cmp`. Повторная проверка исходного `Patch.dsPack` этому не соответствует: entry 35 имеет frame-data начало `+0x44`, а первый блок начинается `f6 08 bf fb ...`; его byte `n=0xF6` и cursor `+0x1EE`. Поэтому prefix-пример не используется как доказательство parser-а; соответствующий временный файл, вероятно, был получен иной/устаревшей версией extraction. Совпадение cursor и preload для `Persistent.dsPreload` проверено отдельно и точно.
 
@@ -159,3 +167,45 @@ Recursive builder `EAX` и wrapper cursor — два разных значени
 Итог проверки: **52 927 / 52 927** совпадений, **3 058 706 908** байт извлеченных stored payload; **31 835** записей помечены как возможные сжатые (`.cmp`) и оставлены без декомпрессии. Архивы в `resources/` остались неизменными. Временные распаковки не входят в репозиторий/каталог игры.
 
 Проверка payload доказывает правильность копирования диапазонов по таблице, но не подлинность оригинальных имен/размеров, целостность содержимого файла на уровне игрового формата или корректность декомпрессии. Табличное поле `unknown_field` намеренно не называется CRC и не используется как checksum.
+
+## Результат MiniPack декомпрессии
+
+`minipack_model.py` содержит in-memory tree builder, validated fast lookup, word bit reader и token decoder. `dspack_unpack.py --decompress-minipack` запускает его только явно; default CLI остается консервативным. Каждый block проверяется по frame output length, token-bit cursor не должен заходить в literal-data region, literal source и match distance/length ограничены, match-copy корректно поддерживает overlap. Entry публикуется только после успешной декомпрессии всех blocks и точного совпадения суммарной длины; temp file создается рядом с output и атомарно публикуется без overwrite.
+
+Полные результаты на игровых контейнерах:
+
+| Архив | Framed blocks | Size-different entries декодированы | Неизвестные compressed entries `.cmp` | Equal-size raw blocks | Entries с проверенной итоговой длиной |
+|---|---:|---:|---:|---:|---:|
+| `Patch.dsPack` | 1 681 | 28 | 12 | 0 | 40/40 |
+| `Preloads.dsPack` | 1 300 | 198 | 248 | 2 blocks in 2 entries | 557/557 |
+
+Итого 2 979 framed blocks обработаны; декодированы 226 compressed entries, и каждая собрана в точный заявленный dsPack uncompressed size. Два коротких Preloads blocks (87 и 58 байт) внутри валидных frame имели equal stored/expected size и копировались как raw; их block mode фиксируется в manifest. Остальные 260 compressed entries без подтвержденного MiniPack framing остаются `.cmp`.
+
+Разбор остатка `Patch.dsPack`: все 12 opaque entries не имеют валидного MiniPack marker/frame; по типам это 7 SWF, 1 Lua, 1 `.map`, 3 `.dsobject`. В stored prefixes SWF не найдено `FWS/CWS/ZWS`, поэтому SWF CWS/zlib распаковка не применима напрямую. Стандартные zlib/raw DEFLATE/gzip/bzip2/XZ/LZMA/LZ4-frame/Zstd попытки не дали точных полных streams с declared output length.
+
+| Entry | Stored / declared output | Stored prefix | Наблюдение |
+|---|---:|---|---|
+| `crc.map` | 1 032 / 17 036 | `29 88 3c 15 19 00 29 01` | custom/unknown |
+| `Script/Game/Camera/AdjustFOV.lua` | 3 148 / 4 636 | `8e 78 7e 2a 2c cf 0c 76` | не начинается с Lua bytecode/text signature |
+| `Flash/UI/HUD/MP/Export/Kos_Score_HUD.swf` | 6 052 / 8 111 | `be 1d 8a b9 c6 99 95 cb` | нет standard SWF header |
+| `Flash/UI/HUD/DynamicContent/Export/MPMessageQueue.swf` | 5 992 / 10 775 | `e7 0a 8f 89 cc c4 14 50` | нет standard SWF header |
+| `Flash/UI/HUD/DynamicContent/Export/MPMessageMarquee.swf` | 3 328 / 5 251 | `b1 04 06 44 43 c7 cb 0f` | нет standard SWF header |
+| `Flash/UI/HUD/Global/Export/VehicleBlackOut.swf` | 1 564 / 2 257 | `56 00 01 42 bd 07 9b 08` | нет standard SWF header |
+| `Flash/UI/HUD/Global/Export/GlobalHUD.swf` | 6 200 / 10 948 | `e8 b5 ad f5 8b a7 12 41` | нет standard SWF header |
+| `Flash/UI/HUD/Global/Export/BlackOut.swf` | 1 560 / 2 250 | `57 00 01 0b 43 bd ae 98` | нет standard SWF header |
+| `Flash/UI/HUD/EnergyBar/Export/EnergyBar.swf` | 7 872 / 14 620 | `f4 c4 91 de f9 87 83 15` | нет standard SWF header |
+| `Objects/GameObjects/Cameras/AssaultRifle_Zoom.dsobject` | 1 768 / 2 608 | `85 c8 7f 77 e8 0f 18 42` | custom/unknown |
+| `Objects/GameObjects/Cameras/Penetrator_zoom.dsobject` | 1 768 / 2 603 | `83 c1 40 06 00 41 08 09` | custom/unknown |
+| `Objects/GameObjects/Cameras/SMG_Zoom.dsobject` | 1 756 / 2 596 | `82 c3 83 7e ab 42 07 0a` | custom/unknown |
+
+Равноименных побайтно совпадающих uncompressed counterparts для этих Patch остаточных записей в локальных decoded trees не найдено. Исключение повторяемости между контейнерами: `EnergyBar.swf` в Patch и Boot имеет одинаковый stored payload; без decoder это не ground truth uncompressed output.
+
+Остаток всех остальных архивов также инвентаризирован статически: `Audio.dsPack` и все 6 localized audio packs не содержат residual compressed entries; `Boot` — 1 911, `DLC_MP1` — 334, `DLC_MP2` — 305, `Resource` — 17 872, всего 20 422 записи без validated MiniPack frame и с size mismatch. Они охватывают 40+ engine resource extensions: наиболее частые `.dsobject` (6 606), `.dsmaterial` (3 062), `.dsa` (2 113), `.dsmodel` (1 797), `.dssoundcue` (1 644), `.dsparticle` (909), `.tif` (889), `.dscinema` (534), `.lua` (520), `.dsworld` (499), `.dsanimation` (497); WAV residue есть только в `Boot` (251). По 4-byte payload prefix получено 19 350 уникальных значений для 20 422 entries; общего wrapper signature не наблюдается. Только 31 payload начинается со структурно допустимого zlib header candidate (3 Boot, 28 Resource), и ни один не декодировался как завершенный zlib stream с точным declared output size. Остальные не имеют известных gzip/bzip2/xz/zstd/LZ4/ZIP/zlib-at-start signatures. Наблюдается 24 группы точных повторов (84 entries), включая одинаковые language-specific fonts в Boot и shared assets между DLC/Resource; это согласуется с обычным дублированием ресурсов, не с единым аудиокодеком.
+
+Из 248 residual entries `Preloads.dsPack`: 123 `des.dsPreload`, 92 `per.dsPreload`, 31 menu preload, одна `Boot.dsPreload` и один `crc.map`. Их stored bytes составляют 677 020, заявленный output — 2 315 158 байт. MiniPack marker и signatures gzip/zstd/LZ4-frame/xz/bzip2 не найдены. Одна запись имеет валидный zlib header с preset-dictionary flag; строгий inflate завершился `Z_NEED_DICT`, поэтому без известного словаря это не подтвержденная декомпрессия. Найдены две пары точных повторов stored bytes: `checkpoint_10_RequirePilotDesign2_nosave/per.dsPreload` ↔ `checkpoint_11_tvsection/des.dsPreload` (6 948→25 011 байт) и `checkpoint_23_ToGardenCenter_nosave/des.dsPreload` ↔ `checkpoint_21_officesenter/per.dsPreload` (176→217 байт). Совпадения подтверждают повторяемость opaque payload, но не раскрывают codec.
+
+Поэтому эти 20 422 residual entries нельзя безопасно прогонять через MiniPack decoder только по признаку `stored_size != unpacked_size`: неизвестно, относятся ли они к другому алгоритму, сериализации по типу ресурса или к комбинации. Нужен отдельный статический путь загрузчика residual resource types в EXE/engine DLL и точная проверка на known-good exemplar. До этого остаются `.cmp`.
+
+Наблюдаемая структура decoded output: `Persistent.dsPreload` начинается с `/Animations/Characters/Player/...` и далее содержит resource paths; `UI/F2MenuTree.dsMenuFlow` содержит `MainMenu`, `menuControllerObjectTable`, `transitions`, `FEARMainMenu` и связные значения меню. Это сильная содержательная валидация на реальных game blocks, вместе с точными длинами всех записей. Пользовательский `/home/drcerg/Documents/luasense.lua` стал точным full-output oracle для `Patch.dsPack:Script/luasense.lua`: оба файла являются Lua 5.1 bytecode version `0x51`, имеют размер `939546`, SHA-256 `5638c4cea924c34d6b5150b7d3db781c5eb8c7a714656ba64c240a4a4b930120`, а `cmp` подтвердил byte-for-byte идентичность. Системный `luac5.1` 5.1.5 отверг оригинал с `bad header in precompiled chunk`; bytecode не исполнялся. Это валидирует также третий token branch/decoder sample. Для остальных asset full-output oracle отсутствует, и terminal-source pointer еще статически сверяется, поэтому decoder остается opt-in.
+
+После полного CLI прогона с флагом получено: `Patch.dsPack` — 28 MiniPack entries декодированы, 12 unknown entries сохранены `.cmp`, все 40 выходных размеров совпали; `Preloads.dsPack` — 198 MiniPack entries декодированы, 248 unknown `.cmp`, 111 изначально uncompressed entries скопированы, все 557 выходных размеров совпали. Два смешанных Preloads entries содержали по одному equal-size raw block; `block_output_modes` в manifest различает raw passthrough и декодированные блоки. Полные тесты включают реальные игровые записи `F2MenuTree.dsMenuFlow` и `Persistent.dsPreload`.
