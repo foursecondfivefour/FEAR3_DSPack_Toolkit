@@ -4,13 +4,19 @@
 
 IDA analysis of `sub_AA9AC0` shows these archive-level codec selections:
 
-| Flag | Codec ID | Engine codec name | `dspack.py` |
-|---:|---:|---|---|
-| `0x08` | `0xC5735A0F` | ZLib | Not decoded |
-| `0x10` | `0xC5735A10` | LZX | Not decoded |
-| `0x20` | `0xC5735A11` | LZD | Decoded |
+| Flag | Codec ID | Engine codec name | C++ GUI/CLI | Older Python reference |
+|---:|---:|---|---|---|
+| `0x08` | `0xC5735A0F` | ZLib | Decoded via side-by-side `zlib1.dll` | Decoded via Python `zlib` |
+| `0x10` | `0xC5735A10` | LZX | Unsupported; skipped or raw-preserved | Experimental 7-Zip CAB bridge; unverified on a real FEAR 3 member |
+| `0x20` | `0xC5735A11` | LZD | Decoded natively | Decoded in Python |
 
-The game diagnostic `sub_A767C0` names ZLib, LZX, and LZD. Codec choice is archive-level and the Python helper chooses the first matching flag in ZLib, LZX, LZD order. `Audio.dsPack` advertises ZLib in its archive flags, but its entries have equal logical/stored sizes in the inspected install; they are copied as stored data. This is not an audio codec implementation.
+The game diagnostic `sub_A767C0` names ZLib, LZX, and LZD. Codec choice is archive-level; both tools choose the first matching flag in ZLib, LZX, LZD order. `Audio.dsPack` advertises ZLib in its archive flags, but its entries have equal logical/stored sizes in the inspected install; they are copied as stored data. This is not an audio codec implementation.
+
+## ZLib Blocks
+
+The engine path `sub_A50420 -> sub_E5A3A0 -> sub_F023C0` passes each compressed block directly to zlib 1.2.3 with the per-block expected output size. The stream uses the normal zlib wrapper (header and Adler-32 trailer), not raw DEFLATE. C++ dynamically loads the side-by-side `dspack_cpp_runtime\zlib1.dll`; the older Python version uses Python's standard-library `zlib` module. Both require a completed stream and exact output size; Python explicitly rejects trailing stream bytes.
+
+ZLib resources may also use the shared `StreamCompression` wrapper described below. In that case the wrapper checksum and block ranges are validated, and each indexed payload is independently zlib-inflated to its declared block length.
 
 Other notable flags observed in the engine:
 
@@ -20,7 +26,7 @@ Other notable flags observed in the engine:
 
 ## Raw LZD Block
 
-The LZD block decoder in `dspack.py` is based on engine functions `sub_B44930`, `sub_714AC0`, `sub_4694F0`, `sub_65C290`, `sub_7D7630`, `sub_AE3D50`, and `sub_78A130`.
+The LZD decoders in `dspack_cpp.cpp` and the older `dspack.py` are based on engine functions `sub_B44930`, `sub_714AC0`, `sub_4694F0`, `sub_65C290`, `sub_7D7630`, `sub_AE3D50`, and `sub_78A130`.
 
 At a high level it:
 
@@ -36,7 +42,7 @@ The implementation rejects truncated trees/bitstreams, impossible node reference
 
 Some resources wrap several LZD blocks in a `StreamCompression` record. The game parser `sub_839990` reads a 32-byte header and then `12 * block_count` bytes of index data; `sub_A50420` seeks to block offsets and decodes a block on demand.
 
-The current wrapper implementation reads eight big-endian DWORDs:
+Both implementations read eight big-endian DWORDs:
 
 | Offset | Meaning used by decoder |
 |---:|---|
@@ -61,9 +67,17 @@ The checksum starts at `0x811C9DC5` and folds header DWORDs 1 through 6, followe
 
 The wrapper validates the checksum, table bounds, block data ranges, and final output size before returning decoded bytes. Unknown header/index fields are preserved as unknown in the documentation.
 
+## LZX Framing And Experimental Bridge
+
+IDA identifies the game's LZX decoder as standard Microsoft LZX with a 1 MiB window, but FEAR 3 wraps its input in game-specific frame headers. `sub_F0C650` parses either a two-byte big-endian compressed length (32 KiB output) or the extended `FF + output length + compressed length` form, then feeds each payload to a stateful decoder. The game path also reserves a five-byte trailer.
+
+The older Python reference parses that framing, converts the frames to a synthetic CAB folder with `LZX:20`, and asks an installed 7-Zip executable to decode a temporary CAB. The bridge is experimental: installed archives contain no compressed LZX members, so FEAR 3-to-CAB frame equivalence has not been verified against a real LZX resource. If 7-Zip is absent or rejects the data, Python reports an error rather than writing undecoded bytes under the original name. The C++ GUI/CLI intentionally does not attempt this bridge; it reports compressed LZX entries as unsupported or writes them in raw mode.
+
 ## Current Support Boundary
 
-- LZD raw blocks and LZD StreamCompression-wrapped members are decoded.
-- ZLib and LZX flags are recognized for reporting, but their compressed entries are skipped by default.
+- C++ decodes LZD raw blocks and LZD StreamCompression-wrapped members natively.
+- C++ decodes ZLib raw and StreamCompression-wrapped entries via `zlib1.dll`.
+- Older Python decodes LZD and ZLib using Python implementations.
+- Only the older Python version attempts the experimental external 7-Zip CAB bridge for LZX; no installed FEAR 3 LZX payload has validated it.
 - `--raw-compressed` writes encoded bytes with a `.packed` suffix; it does not decode them.
 - The implementation is for extraction, not archive creation or recompression.

@@ -2,18 +2,18 @@
 
 ## Prefix And Versions
 
-The current parser accepts the eight-byte prefix:
+Both current readers accept the eight-byte prefix:
 
 | Offset | Size | Meaning |
 |---:|---:|---|
 | `0x00` | 4 | ASCII `mgf ` (`6D 67 66 20`) |
 | `0x04` | 4 | Version, little-endian; supported values are `0x5A5A0107` and `0x5A5A0108` |
 
-IDA analysis found the game validating this prefix in `sub_93A0A0` and dispatching v107/v108 parsing in `sub_AA9AC0`. Older versions are not accepted by this prototype.
+IDA analysis found the game validating this prefix in `sub_93A0A0` and dispatching v107/v108 parsing in `sub_AA9AC0`. Older versions are not accepted by either extractor.
 
 ## Common Index Header
 
-After the 8-byte prefix, the prototype reads the common 56-byte index header as fourteen little-endian DWORDs. It uses these fields:
+After the 8-byte prefix, the tools read the common 56-byte index header as fourteen little-endian DWORDs. They use these fields:
 
 | Header-relative offset | Absolute file offset | Field used by parser | Meaning |
 |---:|---:|---|---|
@@ -27,11 +27,11 @@ After the 8-byte prefix, the prototype reads the common 56-byte index header as 
 | `0x30` | `0x38` | `block_size` | Internal compression block size |
 | `0x34` | `0x3C` | `aux_offset` | Auxiliary/version-specific value; not interpreted by the parser |
 
-The game reads a larger version-dependent header for v107/v108 and processes additional lookup data. `dspack.py` currently parses the common fields it needs for file listing and extraction; it does not reconstruct every auxiliary index. Treat the table above as the parser's consumed layout, not a complete specification of every header field.
+The game reads a larger version-dependent header for v107/v108 and processes additional lookup data. The C++ and Python readers parse the common fields needed for file listing and extraction; neither reconstructs every auxiliary index. Treat the table above as the fields consumed by the tools, not a complete specification of every header field.
 
 ## File And Directory Records
 
-The parser reads each file and directory record as six little-endian unsigned 32-bit integers (`<6I`), for 24 bytes per record.
+Both parsers read each file and directory record as six little-endian unsigned 32-bit integers (`<6I`), for 24 bytes per record.
 
 File records are interpreted as:
 
@@ -57,16 +57,16 @@ Directory records are interpreted as:
 | `+0x10` | first file | Start of the directory's file range |
 | `+0x14` | end file | End-exclusive file range; both range fields can be `0xFFFFFFFF` for no files |
 
-The engine's directory enumerator `sub_D72620` follows child/sibling links; `sub_A9C9D0` iterates file ranges. The extractor constructs output paths from file parent indices and the directory parent chain.
+The engine's directory enumerator `sub_D72620` follows child/sibling links; `sub_A9C9D0` iterates file ranges. Both extractors construct output paths from file parent indices and the directory parent chain.
 
 ## Strings And Paths
 
-Names are NUL-terminated byte strings in the shared string table, not fixed-size inline fields. The parser decodes them as UTF-8 with replacement for invalid sequences. Path separators are normalized to `/`, and empty/dot components are removed. File names retain their archive casing and spaces.
+Names are NUL-terminated byte strings in the shared string table, not fixed-size inline fields. Python decodes them as UTF-8 with replacement for invalid sequences; C++ carries them as UTF-8 paths for Windows filesystem conversion. Path separators are normalized to `/`, and empty/dot components are removed. File names retain their archive casing and spaces.
 
-The tool rejects `..` components before writing. It does not currently implement a complete Windows-specific path sanitizer for reserved device names or all drive/UNC forms; use a fresh destination and review `--list` output when working with untrusted archives.
+The tools reject `..` path components before writing. The C++ implementation also rejects absolute/rooted paths, drive-colon paths, and duplicate normalized output targets within one archive. Neither tool is intended as a hardened sandbox for untrusted archives; review listed paths and extract to a fresh destination.
 
 ## Compression Classification
 
-The extractor classifies an entry as internally compressed when archive flag `0x02` (`InternalCompression`) is set and `logical_size != stored_size`. This rule is observed in the game's file-open path and used by `Pack.is_compressed()`.
+Both extractors classify an entry as internally compressed when archive flag `0x02` (`InternalCompression`) is set and `logical_size != stored_size`. This rule is observed in the game's file-open path.
 
-The high bit `0x80000000` is reported by the game as `MiniPack`; it is a filesystem/mount concept, not another codec supported by this parser.
+The high bit `0x80000000` is reported by the game as `MiniPack`; it is an engine filesystem/mount concept, not another codec supported by either parser.
