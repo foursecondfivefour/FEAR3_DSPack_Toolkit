@@ -1,6 +1,6 @@
 # FEAR 3 dsPack Toolkit
 
-A community-built, read-only extractor for FEAR 3 / Despair Engine `.dsPack` archives. The recommended tool is a native Windows C++20 CLI and GUI; an older Python implementation is kept as a reference.
+ read-only extractor for FEAR 3 / Despair Engine `.dsPack` archives. The recommended tool is a native Windows C++20 CLI and GUI; an older Python implementation is kept as a reference.
 
 > **Before making this repository public:** choose and add an open-source license. No license is included yet, so default copyright rules apply and others do not automatically have permission to reuse or redistribute this code.
 
